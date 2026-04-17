@@ -97,6 +97,7 @@ def generate_launch_description():
                 'use_sim_time': use_sim_time,
                 'autostart': autostart,
                 'params_file': params_file,
+                'default_bt_xml_filename': bt_xml_file,
                 'use_lifecycle_mgr': 'true',
             }.items(),
         ),

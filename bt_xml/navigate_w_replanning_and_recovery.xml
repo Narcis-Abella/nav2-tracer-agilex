@@ -16,7 +16,7 @@
     - Add PauseResumeController decorator wrapping NavigateRecovery
       for GPIO E-stop integration (currently handled by estop_node.py)
 -->
-<root BTCPP_format="4" main_tree_to_execute="MainTree">
+<root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
     <RecoveryNode number_of_retries="6" name="NavigateRecovery">
 

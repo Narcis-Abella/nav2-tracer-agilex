@@ -8,7 +8,7 @@ collision_monitor:
     base_frame_id: base_link
     odom_frame_id: odom
     cmd_vel_in_topic: cmd_vel_nav   # raw from controller_server
-    cmd_vel_out_topic: cmd_vel_smoothed  # to velocity_smoother
+    cmd_vel_out_topic: cmd_vel  # to velocity_smoother (hardcoded input in Nav2 Humble)
     state_topic: collision_monitor/state
     transform_tolerance: 0.5
     source_timeout: 2.0
@@ -20,7 +20,7 @@ collision_monitor:
     # Approach model: always maintain 2s margin to collision
     # Slows progressively as robot approaches obstacles
     ApproachZone:
-      type: polygon
+      type: footprint
       footprint_topic: /local_costmap/published_footprint
       action_type: approach
       time_before_collision: 2.0

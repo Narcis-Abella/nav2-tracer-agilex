@@ -27,7 +27,9 @@ class EStopNode(Node):
         self._pin = self.get_parameter('gpio_pin').value
         self._estop_active = False
 
-        self._vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # Publish on controller output topic so zero-vel flows through
+        # CollisionMonitor + VelocitySmoother pipeline.
+        self._vel_pub = self.create_publisher(Twist, '/cmd_vel_nav', 10)
         self._nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
 
         if GPIO_AVAILABLE:
@@ -61,7 +63,13 @@ class EStopNode(Node):
     def _cancel_navigation(self):
         if self._nav_client.server_is_ready():
             self.get_logger().info('Sending cancel to NavigateToPose action server')
-            self._nav_client._cancel_all_goals()
+            cancel_all = getattr(self._nav_client, 'cancel_all_goals_async', None)
+            if callable(cancel_all):
+                cancel_all()
+            else:
+                self.get_logger().warn(
+                    'ActionClient has no cancel_all_goals_async(); publishing zero velocity only'
+                )
         zero = Twist()
         self._vel_pub.publish(zero)
 
