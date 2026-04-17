@@ -1,0 +1,68 @@
+# CollisionMonitor — acts directly on /cmd_vel, independent of BT
+# Three zones: footprint approach model + frontal slowdown + stop
+# Source: /scan (2D LaserScan from pc_to_laserscan)
+
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: base_link
+    odom_frame_id: odom
+    cmd_vel_in_topic: cmd_vel_nav   # raw from controller_server
+    cmd_vel_out_topic: cmd_vel_smoothed  # to velocity_smoother
+    state_topic: collision_monitor/state
+    transform_tolerance: 0.5
+    source_timeout: 2.0
+    base_shift_correction: true
+    stop_pub_timeout: 2.0
+    polygons: [ApproachZone, SlowdownZone, StopZone]
+    observation_sources: [scan]
+
+    # Approach model: always maintain 2s margin to collision
+    # Slows progressively as robot approaches obstacles
+    ApproachZone:
+      type: polygon
+      footprint_topic: /local_costmap/published_footprint
+      action_type: approach
+      time_before_collision: 2.0
+      simulation_time_step: 0.02
+      min_points: 3
+      enabled: true
+      polygon_pub_topic: collision_monitor/approach_zone
+
+    # Frontal slowdown zone — 80cm forward reach
+    SlowdownZone:
+      type: polygon
+      points: "[[0.8, 0.5], [0.8, -0.5], [-0.3, -0.5], [-0.3, 0.5]]"
+      action_type: slowdown
+      slowdown_ratio: 0.3
+      min_points: 3
+      enabled: true
+      polygon_pub_topic: collision_monitor/slowdown_zone
+
+    # Stop zone — immediate stop when very close
+    StopZone:
+      type: polygon
+      points: "[[0.4, 0.3], [0.4, -0.3], [-0.2, -0.3], [-0.2, 0.3]]"
+      action_type: stop
+      min_points: 3
+      enabled: true
+      polygon_pub_topic: collision_monitor/stop_zone
+
+    scan:
+      type: scan
+      topic: /scan
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: false
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: OPEN_LOOP
+    max_velocity: [1.0, 0.0, 1.9]    # [vx, vy, wz]
+    min_velocity: [-0.35, 0.0, -1.9]
+    max_accel: [2.5, 0.0, 3.2]
+    max_decel: [-2.5, 0.0, -3.2]
+    odom_topic: /odom_lidar
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0

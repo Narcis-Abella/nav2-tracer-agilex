@@ -1,0 +1,14 @@
+# Force LF for all text files — this repo runs on Linux (Jetson Orin NX)
+* text=auto eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.xml text eol=lf
+*.launch.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.cfg text eol=lf
+
+# Binaries
+*.pdf binary
+*.pgm binary
+*.png binary

@@ -1,0 +1,18 @@
+# ROS2 build artifacts
+build/
+install/
+log/
+*.pyc
+__pycache__/
+
+# Maps (generated day-before, not committed)
+maps/*.pgm
+maps/*.yaml
+
+# Editor
+.vscode/
+*.swp
+*.swo
+
+# Claude
+.claude/

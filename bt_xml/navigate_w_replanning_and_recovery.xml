@@ -1,0 +1,102 @@
+<!--
+  Custom BT for Tracer Agilex 2.0 — SocialTech Challenge
+  Nav2 Humble | SmacPlanner2D + SimpleSmoother | RotationShim+MPPI
+
+  Recovery escalation:
+    1. ConditionalReplanning (1Hz rate-limited replan + path validity check)
+    2. ClearGlobal costmap on compute failure
+    3. ClearLocal costmap on follow failure
+    4. SoftRecovery:   Wait(2s) + ClearLocal     — dynamic obstacle passed
+    5. ActiveRecovery: BackUp + Spin(90°) + ClearBoth — physically unstuck
+    6. LastResort:     Wait(5s) + ClearBoth       — slow dynamic obstacle
+
+  TODO post-MVP:
+    - Add IsGoalNearby (threshold 0.5m) condition inside ReactiveFallback
+      to skip rate-limited replan when near goal
+    - Add PauseResumeController decorator wrapping NavigateRecovery
+      for GPIO E-stop integration (currently handled by estop_node.py)
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+
+      <PipelineSequence name="NavigateWithReplanning">
+
+        <ControllerSelector selected_controller="{selected_controller}"
+                            default_controller="FollowPath"
+                            topic_name="controller_selector"/>
+        <PlannerSelector selected_planner="{selected_planner}"
+                         default_planner="SmacPlanner2D"
+                         topic_name="planner_selector"/>
+        <GoalCheckerSelector selected_goal_checker="{selected_goal_checker}"
+                             default_goal_checker="general_goal_checker"
+                             topic_name="goal_checker_selector"/>
+        <ProgressCheckerSelector selected_progress_checker="{selected_progress_checker}"
+                                 default_progress_checker="progress_checker"
+                                 topic_name="progress_checker_selector"/>
+
+        <!-- Replan at 1Hz; clear global costmap if compute fails -->
+        <RecoveryNode number_of_retries="1" name="ComputePathRecovery">
+          <ReactiveSequence name="ConditionalReplanning">
+            <RateController hz="1.0">
+              <Sequence>
+                <ComputePathToPose goal="{goal}"
+                                   path="{path}"
+                                   planner_id="SmacPlanner2D"
+                                   error_code_id="{compute_path_error_code}"/>
+                <SmoothPath unsmoothed_path="{path}"
+                            smoothed_path="{path}"
+                            smoother_id="simple_smoother"
+                            error_code_id="{smoother_error_code}"/>
+              </Sequence>
+            </RateController>
+            <IsPathValid path="{path}"/>
+          </ReactiveSequence>
+          <ClearEntireCostmap name="ClearGlobalCostmap-Context"
+                              service_name="/global_costmap/clear_entirely_global_costmap"/>
+        </RecoveryNode>
+
+        <!-- Follow path; clear local costmap if follow fails -->
+        <RecoveryNode number_of_retries="1" name="FollowPathRecovery">
+          <FollowPath path="{path}"
+                      controller_id="FollowPath"
+                      error_code_id="{follow_path_error_code}"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context"
+                              service_name="/local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+
+      </PipelineSequence>
+
+      <!-- Progressive system recovery: soft → active → last resort -->
+      <Sequence name="SystemRecovery">
+
+        <!-- SoftRecovery: wait for dynamic obstacle to pass -->
+        <Wait wait_duration="2.0"/>
+        <ClearEntireCostmap name="ClearLocalCostmap-Soft"
+                            service_name="/local_costmap/clear_entirely_local_costmap"/>
+
+        <!-- ActiveRecovery: physically unstick robot
+             VALIDATE: verify Tracer+chair has space for 90deg spin in 120cm corridors
+             If not: replace Spin with second BackUp -->
+        <BackUp backup_dist="0.3"
+                backup_speed="0.15"
+                error_code_id="{backup_error_code}"/>
+        <Spin spin_dist="1.5708"
+              error_code_id="{spin_error_code}"/>
+        <ClearEntireCostmap name="ClearLocalCostmap-Active"
+                            service_name="/local_costmap/clear_entirely_local_costmap"/>
+        <ClearEntireCostmap name="ClearGlobalCostmap-Active"
+                            service_name="/global_costmap/clear_entirely_global_costmap"/>
+
+        <!-- LastResort: wait for slow dynamic obstacle -->
+        <Wait wait_duration="5.0"/>
+        <ClearEntireCostmap name="ClearLocalCostmap-LastResort"
+                            service_name="/local_costmap/clear_entirely_local_costmap"/>
+        <ClearEntireCostmap name="ClearGlobalCostmap-LastResort"
+                            service_name="/global_costmap/clear_entirely_global_costmap"/>
+
+      </Sequence>
+
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

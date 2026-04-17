@@ -1,0 +1,248 @@
+
+════════════════════════════════════════════════════════════════════════════
+       NAV2 STACK — WORKFLOW FINAL AUDITADO
+       SocialTech Challenge · Tracer Agilex 2.0 · Livox Mid-360 · Jetson Orin NX 16GB
+════════════════════════════════════════════════════════════════════════════
+
+── SENSOR INPUTS ────────────────────────────────────────────────────────────
+
+  Livox Mid-360          /livox/lidar  (PointCloud2)
+                         FOV: 360° horizontal, -7° a +52° vertical
+                         FOV efectivo con silla: ~200°+ horizontal
+                         10 Hz, 200k pts/s
+
+  LiDAR IMU integrado    /lidar/imu  (Imu)
+                         IMU interna del Mid-360, tightly coupled con LiDAR
+
+  2D map (PGM)           Generado con GLIM el día anterior
+                         Solo estructura fija: paredes, puertas
+                         Sin camillas ni objetos móviles
+                         → map_server → /map  (OccupancyGrid)
+
+── PREPROCESSING ────────────────────────────────────────────────────────────
+
+  pc_to_laserscan        /livox/lidar → /scan  (LaserScan 2D)
+                         Proyección horizontal para AMCL y costmaps
+
+── ODOMETRÍA ────────────────────────────────────────────────────────────────
+
+  FAST-LIO2              /livox/lidar + /lidar/imu
+    (provisional)        → /odom_lidar  (Odometry)
+                         LiDAR-inertial tightly coupled (iEKF)
+                         Validar empíricamente con FOV real del montaje
+                         Fallback: KISS-ICP si FAST-LIO2 es inestable
+
+── LOCALIZACIÓN ─────────────────────────────────────────────────────────────
+
+  AMCL                   /scan  +  /map  +  /odom_lidar
+                         → /amcl_pose  (PoseWithCovarianceStamped)
+                         → tf  map → odom
+                         odom_lidar viene directamente de FAST-LIO2
+                         Modelo: likelihood field (más robusto que beam)
+                         Precisión esperada: ~5cm en entornos estructurados
+
+── COSTMAPS ─────────────────────────────────────────────────────────────────
+
+  global_costmap         Frame: map  |  rolling_window: false
+  ├── static_layer       /map → paredes y estructura fija (nunca se borra)
+  ├── stvl_layer         /livox/lidar (PointCloud2) → obstáculos dinámicos
+
+  │     plugin: spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer
+  │     voxel_decay: 30.0          # fuera del FOV: persiste 30s
+  │     decay_model: 0             # linear
+  │     decay_acceleration: 15.0  # dentro del FOV: limpia rápido (~2s)
+  │     model_type: 1              # 3D LiDAR
+  │     vertical_fov_angle: 1.01  # 58° (FOV vertical Mid-360)
+  │     vertical_fov_offset: 0.39 # offset +22.5° (FOV asimétrico)
+  │     horizontal_fov_angle: 3.49 # ~200° (FOV real con silla)
+  │     → Distingue "veo zona libre" de "no veo esa zona"
+  │     → Evita oscilación camino A / camino B
+  └── inflation_layer    inflation_radius: 0.08  (< 9.5cm margen puertas 80cm)
+                         cost_scaling_factor: 3.5
+                         → Campo potencial suave → paths centrados en pasillo
+
+  local_costmap          Frame: odom  |  rolling_window: true
+  ├── obstacle_layer     /scan → obstáculos 2D, clearing: true
+  │     raytrace_max_range: 5.0
+  │     obstacle_max_range: 4.0
+  │     observation_persistence: 0.5
+  ├── voxel_layer        /livox/lidar → obstáculos 3D volumétricos
+  └── inflation_layer    mismo radio que global
+
+  footprint              POLIGONAL — no circular
+    Tracer + silla:      "[[0.35, 0.305], [0.35, -0.305],
+                           [-0.35, -0.305], [-0.35, 0.305]]"
+    (ajustar tras medir el montaje real)
+
+── PLANNING ─────────────────────────────────────────────────────────────────
+
+  global_planner         SmacPlanner2D
+    (SmacPlanner2D)      A* cost-aware, 8-connected neighborhood
+                         Footprint poligonal durante la búsqueda
+                         cache_obstacle_heuristic: true  (replanning 40-300% más rápido)
+                         → Mejor que NavFn para footprint no circular
+                         → Más seguro que ThetaStar en puertas de 80cm
+
+  path_smoother          Simple Smoother
+    (SimpleSmoother)     Elimina defectos jagged del A*
+                         ~0.9ms → coste computacional despreciable
+                         Mejora calidad del path que recibe MPPI
+                         do_refinement: true
+
+  local_controller       RotationShim → MPPI
+    (MPPI)               Gira primero hacia el heading del path, luego sigue
+                         batch_size: 2000  @  30Hz  (recomendación paper)
+                         motion_model: DiffDrive
+                         critics: [ConstraintCritic, CostCritic, GoalCritic,
+                                   GoalAngleCritic, PathAlignCritic,
+                                   PathFollowCritic, PathAngleCritic,
+                                   PreferForwardCritic]
+                         CostCritic activo → ralentización dinámica
+                           en espacios estrechos (sin SpeedFilter hardcodeado)
+                         vx_max: 1.0  (velocidad operacional normal)
+                         vx_max reducido a 0.3 cerca de puertas
+                           → gestionado por CostCritic, no por SpeedFilter
+
+── BEHAVIOR TREE ────────────────────────────────────────────────────────────
+
+  PauseResumeController                    ← BOTÓN E-STOP (GPIO Jetson)
+  └── RecoveryNode (3 reintentos)          ← outer: recovery sistémico
+      │
+      ├── PipelineSequence "NavigateWithReplanning"
+      │   ├── ProgressCheckerSelector
+      │   ├── GoalCheckerSelector
+      │   ├── ControllerSelector
+      │   ├── PlannerSelector
+      │   │
+      │   ├── RecoveryNode (1 reintento) "ComputePathRecovery"
+      │   │   ├── ReactiveSequence "ConditionalReplanning"
+      │   │   │   ├── ReactiveFallback
+      │   │   │   │   ├── IsGoalNearby (threshold: 0.5m)  ← skip si cerca
+      │   │   │   │   └── RateController (1.0 Hz)         ← no flood planner
+      │   │   │   │       └── ComputePathToPose → SmacPlanner2D
+      │   │   │   │           └── SmoothPath → SimpleSmoother
+      │   │   │   └── IsPathValid                         ← replan si inválido
+      │   │   └── ClearCostmapService (global)            ← recovery contextual
+      │   │
+      │   └── RecoveryNode (1 reintento) "FollowPathRecovery"
+      │       ├── FollowPath → RotationShim + MPPI
+      │       └── ClearCostmapService (local)             ← recovery contextual
+      │
+      └── Sequence "SystemRecovery"        ← escalado progresivo
+          ├── RecoveryNode "SoftRecovery"
+          │   ├── Wait (2.0s)              ← esperar obstáculo dinámico
+          │   └── ClearCostmapService (local)
+          ├── RecoveryNode "ActiveRecovery"
+          │   ├── Sequence
+          │   │   ├── BackUp (0.3m, 0.15m/s)
+          │   │   ├── Spin (90°)
+          │   │   ├── ClearCostmapService (local)
+          │   │   └── ClearCostmapService (global)
+          └── RecoveryNode "LastResortRecovery"
+              ├── Sequence
+              │   ├── Wait (5.0s)          ← obstáculo dinámico lento
+              │   ├── ClearCostmapService (local)
+              │   └── ClearCostmapService (global)
+
+  ProgressChecker        movement_time_allowance: 15.0s  (ajustar en test)
+  GoalChecker            xy_goal_tolerance: 0.05m
+                         yaw_goal_tolerance: 0.1 rad
+
+── SAFETY LAYER (independiente del BT) ─────────────────────────────────────
+
+  Collision Monitor      Actúa directamente sobre /cmd_vel
+  ├── ApproachZone       type: footprint + approach model
+  │                      time_before_collision: 2.0s
+  │                      → Mantiene siempre 2s de margen a colisión
+  │                      → Ralentiza progresivamente al acercarse
+  ├── SlowdownZone       type: polygon (frontal)
+  │                      points: [[0.8, 0.5], [0.8, -0.5], [-0.3, -0.5], [-0.3, 0.5]]
+  │                      action_type: slowdown, slowdown_ratio: 0.3
+  │                      min_points: 3
+  └── StopZone           type: polygon (muy próximo)
+                         points: [[0.4, 0.3], [0.4, -0.3], [-0.2, -0.3], [-0.2, 0.3]]
+                         action_type: stop
+                         min_points: 3
+
+  Velocity Smoother      /cmd_vel_raw → /cmd_vel
+                         Suaviza picos bruscos antes de llegar al Tracer
+
+── ROBOT BASE ───────────────────────────────────────────────────────────────
+
+  Tracer Agilex 2.0      702 × 610 × 169 mm
+                         Differential drive, radio de giro = 0
+                         /cmd_vel → CAN bus → motores
+                         Velocidad operacional: 0.8–1.0 m/s (normal)
+                                                0.3–0.4 m/s (puertas/pasillos)
+                         Velocidad máxima permitida: 1.67 m/s (6km/h)
+  Feedback (opcional)    /odom_wheel → FAST-LIO2 como fuente adicional
+                         (solo si quieres fusionar ruedas con LiDAR — no prioritario)
+
+── ORQUESTACIÓN DE MISIÓN ───────────────────────────────────────────────────
+
+  Python script          nav2_simple_commander (autónomo, corre en Jetson)
+  (autónomo)
+    navigator.waitUntilNav2Active()
+
+    waypoints = [wp1, wp2, wp3, ..., wpN, home]  # hardcodeados día anterior
+
+    for i, wp in enumerate(waypoints):
+        navigator.goToPose(wp)
+        while not navigator.isTaskComplete():
+            feedback = navigator.getFeedback()
+            # logging: distancia restante, tiempo transcurrido
+
+        result = navigator.getResult()
+        if result == TaskResult.SUCCEEDED:
+            log(f"Waypoint {i} alcanzado")
+        else:
+            log(f"Waypoint {i} fallido → skip")
+            continue   # decisión autónoma, sin intervención humana
+
+  E-Stop                 GPIO Jetson → nodo Python →
+                         ros2 service call /pause_navigation  (PauseResumeController)
+                         Al soltar → /resume_navigation
+
+── TF TREE ──────────────────────────────────────────────────────────────────
+
+  map → odom → base_link → lidar_frame
+    ↑              ↑
+   AMCL        FAST-LIO2 (publica tf odom→base_link directamente)
+
+── DESCARTADO / PENDIENTE ───────────────────────────────────────────────────
+
+  ✗ LV-DOT               ROS1, requiere cámara RGB, no integrado con Nav2
+  ✗ SpeedFilter PGM      Hardcodeado — sustituido por CostCritic + Collision Monitor
+  ✗ Hybrid-A*            Kinematic feasibility innecesaria en diff drive
+  ✗ ThetaStar            Line-of-sight inseguro en puertas de 80cm
+  ✗ robot_localization EKF  Redundante — FAST-LIO2 ya fusiona LiDAR+IMU internamente
+                            con iEKF tightly coupled. Añadir otro EKF encima
+                            sería fusionar lo que ya está fusionado.
+  ✗ fuse (factor graph)  Ídem — 3.7x más CPU que EKF, y el EKF ya es innecesario
+  ✗ DR-SPAAM / YOLO      Sin cámara RGB, overkill para el challenge
+  ⏳ IsCollisionImminent  Post-MVP: CollisionDetector + condition BT node custom
+  ⏳ Logging CSV          Trivial: feedback del simple_commander a fichero
+
+── PARÁMETROS CRÍTICOS A VALIDAR EN LAS SESIONES DEL DÍA ANTES ─────────────
+
+  1. inflation_radius     Verificar que puertas de 80cm siguen siendo navegables
+                          (< 0.095m, empezar en 0.07m)
+
+  2. footprint poligonal  Medir Tracer + silla real tras el montaje definitivo
+
+  3. FAST-LIO2 estabilidad  htop + tegrastats durante giros en el entorno real
+                             Si deriva → KISS-ICP como fallback
+
+  4. STVL decay_acceleration  Validar que el robot dinámico se limpia rápido
+                               cuando el sensor lo ve moverse
+
+  5. Spin en recovery    Verificar que el Tracer + silla tiene espacio
+                         para girar 90° en pasillos de 120cm
+                         Si no → sustituir Spin por BackUp adicional
+
+  6. ProgressChecker     Ajustar movement_time_allowance (default: 15s)
+                         según comportamiento del obstáculo dinámico en test
+
+  7. MPPI batch_size     Monitorizar CPU: 2000 samples @30Hz en Jetson Orin NX
+
+════════════════════════════════════════════════════════════════════════════
